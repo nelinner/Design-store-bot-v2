@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import re
+import urllib.request
 from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -11,8 +13,6 @@ from telegram.ext import (
     ContextTypes,
 )
 from telegram.error import BadRequest, Forbidden
-import aiohttp
-from bs4 import BeautifulSoup
 
 # Включаем логирование
 logging.basicConfig(
@@ -26,9 +26,9 @@ CHANNEL_USERNAME = "@tgdesignstore"
 CHANNEL_ID = "@tgdesignstore"
 ADMIN_USERNAME = "nelinner"  # без @
 
-# Все ссылки на изображения – можно использовать обычные ссылки ibb.co (страницы), бот сам достанет прямые ссылки
-MAIN_MENU_IMAGE = "https://ibb.co/RpCTX9X0"          # Главное меню
-BUY_DESIGN_IMAGE = "https://ibb.co/C5MTqxQ9"         # Раздел «Купить дизайн»
+# Ссылки на страницы ibb.co – бот сам превратит их в прямые
+MAIN_MENU_IMAGE = "https://ibb.co/RpCTX9X0"
+BUY_DESIGN_IMAGE = "https://ibb.co/C5MTqxQ9"
 
 # ===== ДАННЫЕ ПРОДАВЦОВ =====
 SELLERS = {
@@ -109,65 +109,59 @@ SUPPORT_TEXT = (
     "Пожалуйста, опишите вашу проблему максимально подробно, приложите скриншоты при необходимости."
 )
 
-# ===== КЭШ И ЗАГОЛОВКИ ДЛЯ ПАРСИНГА =====
+# ===== КЭШ ДЛЯ ПРЯМЫХ ССЫЛОК =====
 url_cache = {}
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Referer": "https://ibb.co/",
-}
-
-async def get_direct_image_url(ibb_url: str) -> Optional[str]:
+def get_direct_image_url_sync(ibb_url: str) -> Optional[str]:
+    """Синхронно парсит страницу ibb.co и возвращает прямую ссылку на изображение."""
     if "i.ibb.co" in ibb_url:
         return ibb_url
+
     if ibb_url in url_cache:
         return url_cache[ibb_url]
+
     if "ibb.co" not in ibb_url:
         return ibb_url
 
     try:
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
-            async with session.get(ibb_url, timeout=15) as response:
-                if response.status != 200:
-                    logger.warning(f"Не удалось загрузить страницу {ibb_url} (статус {response.status})")
-                    return None
-                html = await response.text()
+        req = urllib.request.Request(
+            ibb_url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html = response.read().decode("utf-8")
 
-        soup = BeautifulSoup(html, 'html.parser')
-        direct_url = None
+        # Ищем og:image
+        match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html)
+        if match:
+            direct = match.group(1)
+            url_cache[ibb_url] = direct
+            return direct
 
-        meta_og = soup.find('meta', property='og:image')
-        if meta_og and meta_og.get('content'):
-            direct_url = meta_og['content']
+        # Ищем link rel="image_src"
+        match = re.search(r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']', html)
+        if match:
+            direct = match.group(1)
+            url_cache[ibb_url] = direct
+            return direct
 
-        if not direct_url:
-            meta_secure = soup.find('meta', property='og:image:secure_url')
-            if meta_secure and meta_secure.get('content'):
-                direct_url = meta_secure['content']
-
-        if not direct_url:
-            link_rel = soup.find('link', rel='image_src')
-            if link_rel and link_rel.get('href'):
-                direct_url = link_rel['href']
-
-        if not direct_url:
-            for link in soup.find_all('a', href=True):
-                if 'i.ibb.co' in link['href']:
-                    direct_url = link['href']
-                    break
-
-        if direct_url:
-            url_cache[ibb_url] = direct_url
-            return direct_url
+        # Ищем любую ссылку, содержащую i.ibb.co
+        match = re.search(r'https?://i\.ibb\.co/[^\s"\'<>]+', html)
+        if match:
+            direct = match.group(0)
+            url_cache[ibb_url] = direct
+            return direct
 
         logger.warning(f"Не найдена прямая ссылка на странице {ibb_url}")
-        return ibb_url
+        return ibb_url  # fallback
 
     except Exception as e:
-        logger.error(f"Ошибка при парсинге {ibb_url}: {e}")
-        return ibb_url
+        logger.error(f"Ошибка парсинга {ibb_url}: {e}")
+        return ibb_url  # fallback
+
+async def get_direct_image_url(ibb_url: str) -> str:
+    """Асинхронная обёртка для синхронного парсинга."""
+    return await asyncio.to_thread(get_direct_image_url_sync, ibb_url)
 
 # ===== КЛАВИАТУРЫ =====
 def build_main_menu_keyboard(is_admin: bool = False):
@@ -254,39 +248,29 @@ def is_admin(update: Update) -> bool:
     return username and username.lower() == ADMIN_USERNAME
 
 def register_user(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Добавляет пользователя в список для рассылок."""
     if 'users' not in context.bot_data:
         context.bot_data['users'] = set()
     context.bot_data['users'].add(chat_id)
 
 async def broadcast_announcement(context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Рассылает объявление всем пользователям из сохранённого списка."""
     users = context.bot_data.get('users', set())
     if not users:
         return
-
     logger.info(f"Рассылка объявления {len(users)} пользователям")
     message = f"📢 {text}"
-
     for chat_id in list(users):
         try:
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
-            # Небольшая задержка, чтобы не упереться в лимиты (30 сообщений в секунду)
             await asyncio.sleep(0.05)
         except Forbidden:
-            # Пользователь заблокировал бота — удаляем его из списка
             logger.warning(f"Пользователь {chat_id} заблокировал бота, удаляю из рассылки")
             users.discard(chat_id)
         except BadRequest as e:
             logger.error(f"Ошибка отправки объявления пользователю {chat_id}: {e}")
-        except Exception as e:
-            logger.error(f"Неизвестная ошибка при отправке {chat_id}: {e}")
 
 # ===== ОБРАБОТЧИКИ КОМАНД =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Сохраняем пользователя
     register_user(context, update.message.chat_id)
-
     if not await is_subscribed(update.message.from_user.id, context):
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")]]
@@ -296,20 +280,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=keyboard,
         )
         return
-
     await show_main_menu(update, context, chat_id=update.message.chat_id)
 
 async def show_main_menu(
     update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int
 ) -> None:
-    """
-    Отправляет главное меню: сначала отдельное сообщение с объявлением (если задано),
-    затем фото с кнопками.
-    """
     is_admin_user = is_admin(update)
     announcement = context.bot_data.get("announcement", "")
 
-    # Отправляем объявление отдельным сообщением, если оно есть
     if announcement:
         try:
             await context.bot.send_message(
@@ -320,35 +298,28 @@ async def show_main_menu(
         except BadRequest as e:
             logger.error(f"Ошибка отправки объявления: {e}")
 
-    # Отправляем фото с кнопками
     caption = "🏠 <b>Главное меню</b>"
     direct_url = await get_direct_image_url(MAIN_MENU_IMAGE)
-    if direct_url:
-        try:
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=direct_url,
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=build_main_menu_keyboard(is_admin=is_admin_user),
-            )
-            return
-        except BadRequest as e:
-            logger.error(f"Ошибка при отправке главного меню: {e}")
-
-    # Запасной текстовый вариант
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=caption,
-        parse_mode="HTML",
-        reply_markup=build_main_menu_keyboard(is_admin=is_admin_user),
-    )
+    try:
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=direct_url,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=build_main_menu_keyboard(is_admin=is_admin_user),
+        )
+    except BadRequest as e:
+        logger.error(f"Ошибка при отправке главного меню: {e}")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode="HTML",
+            reply_markup=build_main_menu_keyboard(is_admin=is_admin_user),
+        )
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-
-    # Сохраняем пользователя
     register_user(context, query.message.chat_id)
 
     data = query.data
@@ -364,7 +335,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except BadRequest:
             pass
 
-    # --- Админ-панель ---
+    # Админ-панель
     if data == "admin_panel":
         if not is_admin(update):
             await query.answer("❌ Доступ запрещён", show_alert=True)
@@ -376,7 +347,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=build_admin_panel_keyboard(),
         )
         return
-
     elif data == "admin_announce":
         if not is_admin(update):
             await query.answer("❌ Доступ запрещён", show_alert=True)
@@ -387,18 +357,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             text="📢 Введите текст объявления (HTML-разметка работает).\nДля отмены отправьте /cancel",
         )
         return
-
     elif data == "admin_clear_announce":
         if not is_admin(update):
             await query.answer("❌ Доступ запрещён", show_alert=True)
             return
         context.bot_data["announcement"] = ""
         await query.answer("✅ Объявление удалено!", show_alert=True)
-        # Возвращаемся в главное меню (без объявления)
         await show_main_menu(update, context, chat_id=query.message.chat_id)
         return
 
-    # --- Остальная логика ---
+    # Остальная логика
     if data == "check_sub":
         if await is_subscribed(user_id, context):
             try:
@@ -408,88 +376,71 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await show_main_menu(update, context, chat_id=query.message.chat_id)
         else:
             await query.answer("❌ Вы всё ещё не подписаны на канал!", show_alert=True)
-
     elif data == "buy_design":
         direct_url = await get_direct_image_url(BUY_DESIGN_IMAGE)
-        if direct_url:
-            try:
-                await context.bot.send_photo(
-                    chat_id=query.message.chat_id,
-                    photo=direct_url,
-                    caption="🛍️ <b>Выберите продавца дизайна:</b>",
-                    parse_mode="HTML",
-                    reply_markup=build_sellers_keyboard(),
-                )
-                return
-            except BadRequest:
-                pass
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text="🛍️ <b>Выберите продавца дизайна:</b>",
-            parse_mode="HTML",
-            reply_markup=build_sellers_keyboard(),
-        )
-
+        try:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=direct_url,
+                caption="🛍️ <b>Выберите продавца дизайна:</b>",
+                parse_mode="HTML",
+                reply_markup=build_sellers_keyboard(),
+            )
+        except BadRequest:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="🛍️ <b>Выберите продавца дизайна:</b>",
+                parse_mode="HTML",
+                reply_markup=build_sellers_keyboard(),
+            )
     elif data.startswith("seller_"):
         seller_key = data[len("seller_"):]
         if seller_key in SELLERS:
             seller = SELLERS[seller_key]
             direct_url = await get_direct_image_url(seller["image_url"])
-
             caption = f"👤 <b>{seller['name']}</b>"
             if seller.get("description"):
                 caption += f"\n{seller['description']}"
-
-            if direct_url:
-                try:
-                    await context.bot.send_photo(
-                        chat_id=query.message.chat_id,
-                        photo=direct_url,
-                        caption=caption,
-                        parse_mode="HTML",
-                        reply_markup=build_seller_detail_keyboard(seller_key),
-                    )
-                    return
-                except BadRequest:
-                    pass
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=caption,
-                parse_mode="HTML",
-                reply_markup=build_seller_detail_keyboard(seller_key),
-            )
-
+            try:
+                await context.bot.send_photo(
+                    chat_id=query.message.chat_id,
+                    photo=direct_url,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=build_seller_detail_keyboard(seller_key),
+                )
+            except BadRequest:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=caption,
+                    parse_mode="HTML",
+                    reply_markup=build_seller_detail_keyboard(seller_key),
+                )
     elif data.startswith("field_"):
         _, seller_key, field_name = data.split("_", 2)
         seller = SELLERS.get(seller_key)
         if seller:
             text = seller["fields"].get(field_name, "Информация отсутствует")
             await query.answer(text, show_alert=True)
-
     elif data == "back_to_main":
         await show_main_menu(update, context, chat_id=query.message.chat_id)
-
     elif data == "back_to_sellers":
         direct_url = await get_direct_image_url(BUY_DESIGN_IMAGE)
-        if direct_url:
-            try:
-                await context.bot.send_photo(
-                    chat_id=query.message.chat_id,
-                    photo=direct_url,
-                    caption="🛍️ <b>Выберите продавца дизайна:</b>",
-                    parse_mode="HTML",
-                    reply_markup=build_sellers_keyboard(),
-                )
-                return
-            except BadRequest:
-                pass
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text="🛍️ <b>Выберите продавца дизайна:</b>",
-            parse_mode="HTML",
-            reply_markup=build_sellers_keyboard(),
-        )
-
+        try:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=direct_url,
+                caption="🛍️ <b>Выберите продавца дизайна:</b>",
+                parse_mode="HTML",
+                reply_markup=build_sellers_keyboard(),
+            )
+        except BadRequest:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="🛍️ <b>Выберите продавца дизайна:</b>",
+                parse_mode="HTML",
+                reply_markup=build_sellers_keyboard(),
+            )
     elif data == "rules":
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")]]
@@ -500,7 +451,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode="HTML",
             reply_markup=keyboard,
         )
-
     elif data == "support":
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")]]
@@ -511,31 +461,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode="HTML",
             reply_markup=keyboard,
         )
-
     else:
         await query.answer("Неизвестная команда", show_alert=True)
 
 # --- Обработчик текстовых сообщений (для объявлений) ---
 async def handle_announcement_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Сохраняет текст объявления и моментально рассылает его всем пользователям."""
     if not is_admin(update) or not context.user_data.get("awaiting_announcement"):
         return
 
     context.user_data["awaiting_announcement"] = False
     text = update.message.text
-
     if not text:
         await update.message.reply_text("❌ Объявление не может быть пустым.")
         return
 
-    # Сохраняем объявление
     context.bot_data["announcement"] = text
     await update.message.reply_text("✅ Объявление сохранено! Начинаю рассылку...")
-
-    # Мгновенная рассылка всем пользователям (в фоне)
     asyncio.create_task(broadcast_announcement(context, text))
-
-    # Показываем обновлённое главное меню админу (объявление будет отдельным постом)
     await show_main_menu(update, context, chat_id=update.message.chat_id)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -543,17 +485,14 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(handle_callback))
-
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.User(username=ADMIN_USERNAME),
             handle_announcement_text,
         )
     )
-
     application.add_error_handler(error_handler)
     logger.info("Бот запущен...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
