@@ -1,4 +1,4 @@
-import asyncio, logging, re, urllib.request
+import asyncio, logging, re, urllib.request, os
 from datetime import datetime
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types, F
@@ -7,7 +7,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BufferedIn
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from weasyprint import HTML
+from playwright.async_api import async_playwright
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -70,71 +70,71 @@ DIRECT_PURCHASE_TEXT = (
     "некоторые элементы на дизайне которые вы не хотите видеть"
 )
 
-# HTML-шаблон карточки отзыва (твой макет)
+# --- НОВЫЙ HTML-ШАБЛОН (твой) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<title>Review Card</title>
-<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;700;800&display=swap" rel="stylesheet">
 <style>
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{width:1024px;height:1024px;overflow:hidden;font-family:'Montserrat',sans-serif;
-       background:radial-gradient(circle at 20% 20%, rgba(0,255,180,.15), transparent 35%),
-                 radial-gradient(circle at 80% 60%, rgba(0,255,180,.12), transparent 30%),
-                 linear-gradient(135deg,#031313,#071717,#0a1010);color:white}
-  .wrapper{position:relative;width:100%;height:100%}
-  .light-1{position:absolute;width:500px;height:1200px;background:rgba(0,255,180,.05);transform:rotate(30deg);left:250px;top:-100px;filter:blur(40px)}
-  .light-2{position:absolute;width:400px;height:1000px;background:rgba(0,255,180,.04);transform:rotate(-20deg);right:100px;top:-100px;filter:blur(40px)}
-  .logo{position:absolute;top:30px;left:50%;transform:translateX(-50%);font-size:72px;font-family:cursive;color:#7cffc9;text-shadow:0 0 10px rgba(124,255,201,.5),0 0 25px rgba(124,255,201,.4)}
-  .title{position:absolute;left:55px;top:150px}
-  .title h1{font-size:82px;font-weight:800;line-height:1}
-  .title p{margin-top:-5px;font-size:30px;font-weight:500}
-  .makeby{position:absolute;right:45px;top:120px;text-align:center}
-  .makeby .top{color:#7cffc9;font-size:54px;font-weight:800}
-  .makeby .btn{margin-top:15px;width:300px;height:90px;border-radius:45px;display:flex;justify-content:center;align-items:center;font-size:42px;font-weight:800;color:white;background:linear-gradient(180deg,#b5d7be,#728e7a);box-shadow:0 0 20px rgba(255,255,255,.15),inset 0 3px 10px rgba(255,255,255,.25)}
-  .review-box{position:absolute;left:60px;top:340px;width:860px;height:430px;border-radius:50px;background:linear-gradient(180deg,rgba(180,180,180,.95),rgba(90,90,90,.92));border:5px solid rgba(255,255,255,.8);box-shadow:0 0 35px rgba(255,255,255,.15),inset 0 1px 20px rgba(255,255,255,.15)}
-  .profile{display:flex;align-items:center;gap:20px;padding:35px}
-  .avatar{width:90px;height:90px;border-radius:50%;background:radial-gradient(circle at 50% 35%, #88ffbc 0 20px, transparent 21px),radial-gradient(circle at 50% 78%, #88ffbc 0 32px, transparent 33px),#051111;border:2px solid rgba(255,255,255,.15);box-shadow:0 0 15px rgba(124,255,201,.4)}
-  .user-info{display:flex;flex-direction:column}
-  .role{font-size:54px;font-weight:700}
-  .username{display:inline-flex;align-items:center;height:45px;padding:0 20px;border-radius:25px;background:rgba(255,255,255,.35);color:white;font-size:30px;font-weight:700}
-  .separator{width:760px;height:4px;background:rgba(255,255,255,.2);margin:0 auto}
-  .review-text{padding:35px 45px;font-size:42px;font-weight:700;line-height:1.5;max-width:760px;word-break:break-word}
-  .date{position:absolute;width:100%;text-align:center;top:790px;font-style:italic}
-  .date .label{font-size:34px}
-  .date .value{font-size:56px}
-  .footer{position:absolute;width:100%;bottom:40px;text-align:center;font-size:56px;font-weight:800}
-  .ceo{position:absolute;left:30px;bottom:30px;font-size:22px;font-weight:700}
+*{margin:0;padding:0;box-sizing:border-box}
+body{width:1080px;height:1080px;overflow:hidden;font-family:Arial,sans-serif;
+     background:radial-gradient(circle at center,#103d39 0%,#031414 50%,#000000 100%)}
+.container{position:relative;width:1080px;height:1080px}
+.design{position:absolute;top:40px;left:350px;color:#7CFFD0;font-size:72px;font-style:italic}
+.title{position:absolute;top:120px;left:60px;color:white;font-size:110px;font-weight:700}
+.subtitle{position:absolute;top:240px;left:70px;color:white;font-size:42px}
+.makeby{position:absolute;right:60px;top:120px;color:#7CFFD0;font-size:42px;font-weight:bold}
+.badge{position:absolute;right:60px;top:180px;background:linear-gradient(180deg,#a4d8af,#6d9775);color:white;padding:18px 35px;border-radius:25px;font-size:40px;font-weight:bold}
+.review{position:absolute;left:60px;top:330px;width:960px;min-height:450px;background:rgba(255,255,255,.35);border:4px solid rgba(255,255,255,.9);border-radius:40px;backdrop-filter:blur(8px);padding:30px}
+.header{display:flex;align-items:center}
+.avatar{width:100px;height:100px;border-radius:50%;background:radial-gradient(circle,#86ffd1,#337c67);margin-right:20px}
+.name{color:white;font-size:56px;font-weight:bold}
+.username{display:inline-block;margin-top:10px;background:#d8d8d8;color:white;padding:8px 20px;border-radius:20px;font-size:34px}
+.line{margin:25px 0;height:2px;background:#bcbcbc}
+.text{color:white;font-size:48px;line-height:1.5;white-space:pre-wrap}
+.date{position:absolute;bottom:180px;width:100%;text-align:center;color:white;font-size:42px}
+.footer{position:absolute;bottom:60px;width:100%;text-align:center;color:white;font-size:64px;font-weight:bold}
 </style>
 </head>
 <body>
-<div class="wrapper">
-<div class="light-1"></div><div class="light-2"></div>
-<div class="logo">Design store</div>
-<div class="title"><h1>Отзывы</h1><p>// Мнение клиентов</p></div>
-<div class="makeby"><div class="top">MAKE BY</div><div class="btn">DESIGN STORE</div></div>
-<div class="review-box">
-<div class="profile">
+<div class="container">
+<div class="design">Design store</div>
+<div class="title">Отзывы</div>
+<div class="subtitle">// Мнение клиентов</div>
+<div class="makeby">MAKE BY</div>
+<div class="badge">DESIGN STORE</div>
+<div class="review">
+<div class="header">
 <div class="avatar"></div>
-<div class="user-info">
-<div class="role">Покупатель</div>
-<div class="username">{{username}}</div>
+<div>
+<div class="name">{name}</div>
+<div class="username">{username}</div>
 </div>
 </div>
-<div class="separator"></div>
-<div class="review-text">{{review_text}}</div>
+<div class="line"></div>
+<div class="text">{review}</div>
 </div>
-<div class="date"><div class="label">дата с отзывом</div><div class="value">{{review_date}}</div></div>
+<div class="date">Дата отзыва<br>{date}</div>
 <div class="footer">T.ME/TGDESIGNSTORE</div>
-<div class="ceo">CEO: @NELINNER</div>
 </div>
 </body>
 </html>
 """
 
-# Кэш прямых ссылок
+# --- Функция рендеринга (Playwright) ---
+async def render_review_card(name: str, username: str, review: str, date: str) -> BytesIO:
+    """Генерирует PNG-карточку отзыва в памяти и возвращает BytesIO."""
+    html = HTML_TEMPLATE.format(name=name, username=username, review=review, date=date)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1080, "height": 1080})
+        await page.set_content(html)
+        screenshot = await page.screenshot(full_page=True, type="png")
+        await browser.close()
+    return BytesIO(screenshot)
+
+# --- Кэш прямых ссылок (для ibb.co) ---
 url_cache = {}
 def get_direct_image_url_sync(ibb_url):
     if "i.ibb.co" in ibb_url: return ibb_url
@@ -152,13 +152,14 @@ def get_direct_image_url_sync(ibb_url):
     except: return ibb_url
 async def get_direct_image_url(url): return await asyncio.to_thread(get_direct_image_url_sync, url)
 
-# Инициализация бота и диспетчера
+# --- Инициализация бота ---
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 user_data = {}
 bot_data = {"announcement": "", "users": set()}
 
+# --- Проверка подписки ---
 async def is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
@@ -179,7 +180,7 @@ async def require_subscription(event, callback: types.CallbackQuery = None):
         await event.answer(f"🔒 Для использования бота подпишитесь на {CHANNEL_USERNAME} и нажмите кнопку.", reply_markup=kb.as_markup())
         return False
 
-# Клавиатуры
+# --- Клавиатуры (без изменений) ---
 def main_menu_kb(is_admin: bool = False):
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="🛍️ Купить дизайн", callback_data="buy_design"))
@@ -236,7 +237,7 @@ def admin_panel_kb():
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main"))
     return builder.as_markup()
 
-# Команда /start
+# --- Команда /start ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     bot_data["users"].add(message.chat.id)
@@ -255,7 +256,7 @@ async def show_main_menu(chat_id: int, username: str = None):
     except:
         await bot.send_message(chat_id, "🏠 <b>Главное меню</b>", reply_markup=main_menu_kb(is_adm))
 
-# Обработчик всех callback
+# --- Callback-обработчик ---
 @dp.callback_query()
 async def handle_callback(callback: types.CallbackQuery):
     data = callback.data
@@ -352,7 +353,7 @@ async def handle_callback(callback: types.CallbackQuery):
         kb.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main"))
         await bot.send_message(uid, SUPPORT_TEXT, reply_markup=kb.as_markup())
 
-    # Оставить отзыв
+    # --- Оставить отзыв ---
     elif data == "leave_review":
         if not await is_subscribed(uid):
             await callback.answer("❌ Сначала подпишитесь на канал!", show_alert=True)
@@ -361,7 +362,7 @@ async def handle_callback(callback: types.CallbackQuery):
         await callback.message.delete()
         await bot.send_message(uid, "📸 Пожалуйста, отправьте скриншот, подтверждающий покупку.")
 
-# Обработчик фото (скриншот покупки)
+# --- Обработчик фото (скриншот) ---
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     uid = message.from_user.id
@@ -371,7 +372,7 @@ async def handle_photo(message: types.Message):
     user_data[uid]["review_step"] = "awaiting_text"
     await message.answer("✏️ Теперь напишите текст отзыва.")
 
-# Обработчик текста (объявления и текст отзыва)
+# --- Обработчик текста (объявления и текст отзыва) ---
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     uid = message.from_user.id
@@ -381,9 +382,7 @@ async def handle_text(message: types.Message):
     if username.lower() == ADMIN_USERNAME and user_data.get(uid, {}).get("awaiting_announcement"):
         user_data[uid]["awaiting_announcement"] = False
         text = message.text
-        if not text:
-            await message.answer("❌ Пустой текст.")
-            return
+        if not text: await message.answer("❌ Пустой текст."); return
         bot_data["announcement"] = text
         await message.answer("✅ Объявление сохранено! Рассылаем...")
         for chat_id in bot_data["users"].copy():
@@ -397,34 +396,28 @@ async def handle_text(message: types.Message):
     # Текст отзыва
     if uid in user_data and user_data[uid].get("review_step") == "awaiting_text":
         review_text = message.text
-        if not review_text:
-            await message.answer("❌ Текст не может быть пустым.")
-            return
+        if not review_text: await message.answer("❌ Текст не может быть пустым."); return
         screenshot_id = user_data[uid].pop("review_screenshot", None)
         user_data[uid]["review_step"] = None
 
-        # Генерация HTML-карточки через WeasyPrint
+        # Генерация карточки (Playwright)
         review_date = datetime.now().strftime("%d.%m.%Y")
         display_username = f"@{message.from_user.username}" if message.from_user.username else "Пользователь"
-        html_content = HTML_TEMPLATE.replace("{{username}}", display_username)\
-                                     .replace("{{review_text}}", review_text)\
-                                     .replace("{{review_date}}", review_date)
-
         try:
-            # Рендерим HTML → PNG в памяти
-            doc = HTML(string=html_content)
-            img_bytes = doc.write_png()
-            if img_bytes is None:
-                raise Exception("WeasyPrint вернул пустой результат")
-            photo_io = BytesIO(img_bytes)
+            img_io = await render_review_card(
+                name="Покупатель",
+                username=display_username,
+                review=review_text,
+                date=review_date
+            )
         except Exception as e:
-            logger.error(f"WeasyPrint render error: {e}")
+            logger.error(f"Playwright render error: {e}")
             await message.answer("❌ Ошибка генерации карточки. Попробуйте позже.")
             return
 
-        # Отправка в канал с отзывами
+        # Отправка в канал
         try:
-            await bot.send_photo(REVIEWS_CHANNEL, BufferedInputFile(photo_io.read(), filename="review_card.png"),
+            await bot.send_photo(REVIEWS_CHANNEL, BufferedInputFile(img_io.read(), filename="review.png"),
                                  caption=f"Отзыв от {display_username}")
             if screenshot_id:
                 await bot.send_photo(REVIEWS_CHANNEL, screenshot_id, caption="📎 Скриншот покупки")
@@ -432,7 +425,6 @@ async def handle_text(message: types.Message):
         except Exception as e:
             logger.error(f"Posting review failed: {e}")
             await message.answer("❌ Не удалось опубликовать отзыв. Попробуйте позже.")
-        return
 
 async def main():
     await dp.start_polling(bot)
