@@ -3,11 +3,11 @@ from datetime import datetime
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, FSInputFile
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from playwright.async_api import async_playwright
+from weasyprint import HTML
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ DIRECT_PURCHASE_TEXT = (
     "некоторые элементы на дизайне которые вы не хотите видеть"
 )
 
-# HTML-шаблон (твой макет) с подключением Google Fonts
+# HTML-шаблон карточки отзыва (твой макет)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -156,11 +156,9 @@ async def get_direct_image_url(url): return await asyncio.to_thread(get_direct_i
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Глобальное хранилище состояний (для простоты – в памяти)
 user_data = {}
 bot_data = {"announcement": "", "users": set()}
 
-# Проверка подписки
 async def is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
@@ -242,7 +240,7 @@ def admin_panel_kb():
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     bot_data["users"].add(message.chat.id)
-    if not await require_submission(message): return
+    if not await require_subscription(message): return
     await show_main_menu(message.chat.id, message.from_user.username)
 
 async def show_main_menu(chat_id: int, username: str = None):
@@ -264,9 +262,8 @@ async def handle_callback(callback: types.CallbackQuery):
     uid = callback.from_user.id
     username = callback.from_user.username
 
-    # Проверка подписки для всех действий, кроме некоторых
     if data not in ("check_sub",) and not data.startswith("field_") and data != "leave_review":
-        if not await require_submission(None, callback): return
+        if not await require_subscription(None, callback): return
 
     # Админ-панель
     if data == "admin_panel":
@@ -364,13 +361,12 @@ async def handle_callback(callback: types.CallbackQuery):
         await callback.message.delete()
         await bot.send_message(uid, "📸 Пожалуйста, отправьте скриншот, подтверждающий покупку.")
 
-# Обработчик фото (для скриншота отзыва)
+# Обработчик фото (скриншот покупки)
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     uid = message.from_user.id
     if uid not in user_data or user_data[uid].get("review_step") != "awaiting_screenshot":
         return
-    # Сохраняем file_id самого большого фото
     user_data[uid]["review_screenshot"] = message.photo[-1].file_id
     user_data[uid]["review_step"] = "awaiting_text"
     await message.answer("✏️ Теперь напишите текст отзыва.")
@@ -390,7 +386,6 @@ async def handle_text(message: types.Message):
             return
         bot_data["announcement"] = text
         await message.answer("✅ Объявление сохранено! Рассылаем...")
-        # Рассылка всем пользователям
         for chat_id in bot_data["users"].copy():
             try:
                 await bot.send_message(chat_id, f"📢 {text}", parse_mode=ParseMode.HTML)
@@ -408,7 +403,7 @@ async def handle_text(message: types.Message):
         screenshot_id = user_data[uid].pop("review_screenshot", None)
         user_data[uid]["review_step"] = None
 
-        # Генерация HTML-карточки через Playwright
+        # Генерация HTML-карточки через WeasyPrint
         review_date = datetime.now().strftime("%d.%m.%Y")
         display_username = f"@{message.from_user.username}" if message.from_user.username else "Пользователь"
         html_content = HTML_TEMPLATE.replace("{{username}}", display_username)\
@@ -416,25 +411,21 @@ async def handle_text(message: types.Message):
                                      .replace("{{review_date}}", review_date)
 
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch()
-                page = await browser.new_page(viewport={"width": 1024, "height": 1024})
-                await page.set_content(html_content, wait_until="networkidle")
-                screenshot = await page.screenshot(full_page=False, type="png")
-                await browser.close()
+            # Рендерим HTML → PNG в памяти
+            doc = HTML(string=html_content)
+            img_bytes = doc.write_png()
+            if img_bytes is None:
+                raise Exception("WeasyPrint вернул пустой результат")
+            photo_io = BytesIO(img_bytes)
         except Exception as e:
-            logger.error(f"Playwright render error: {e}")
+            logger.error(f"WeasyPrint render error: {e}")
             await message.answer("❌ Ошибка генерации карточки. Попробуйте позже.")
             return
 
         # Отправка в канал с отзывами
         try:
-            # Карточка
-            photo_io = BytesIO(screenshot)
-            photo_io.name = "review_card.png"
-            await bot.send_photo(REVIEWS_CHANNEL, FSInputFile(photo_io),
+            await bot.send_photo(REVIEWS_CHANNEL, BufferedInputFile(photo_io.read(), filename="review_card.png"),
                                  caption=f"Отзыв от {display_username}")
-            # Скриншот (если есть)
             if screenshot_id:
                 await bot.send_photo(REVIEWS_CHANNEL, screenshot_id, caption="📎 Скриншот покупки")
             await message.answer("✅ Ваш отзыв опубликован! Спасибо!")
